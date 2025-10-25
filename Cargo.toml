@@ -1,6 +1,6 @@
 [package]
 name = "v-storage"
-version = "0.1.2"
+version = "0.2.0-heed"
 authors = ["itiu <ValeriyBushenev@gmail.com>"]
 edition = "2024"
 description = "Storage layer for the veda platform"
@@ -26,9 +26,8 @@ rusty_tarantool_3 = { version = "=0.3.0", optional = true, package = "rusty_tara
 v-individual-model = "0.2.1"
 #v-individual-model = { package = "v-individual-model", path = "../v-individual-model"}
 
-v_authorization = "=0.4.0"
-lmdb-rs-m = "0.8.0"
-#lmdb-rs-m = { path = "../lmdb-rs" }
+v_authorization = "=0.5.1"
+heed = "0.22.0"
 
 nng = "1.0.1"
 log = "0.4"

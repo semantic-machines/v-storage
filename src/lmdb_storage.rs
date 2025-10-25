@@ -1,10 +1,20 @@
 use v_individual_model::onto::individual::Individual;
 use v_individual_model::onto::parser::parse_raw;
 use crate::common::{Storage, StorageId, StorageMode, StorageResult};
-use lmdb_rs_m::core::EnvCreateFlags;
-use lmdb_rs_m::{DbFlags, DbHandle, EnvBuilder, Environment, MdbError};
-use lmdb_rs_m::{FromMdbValue, ToMdbValue};
+use heed::{Env, EnvOpenOptions};
+use heed::types::*;
 use std::iter::Iterator;
+use std::path::Path;
+use std::fs;
+use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+// Global registry of shared environments by path.
+// This is critical for LMDB: multiple instances in the same process must share
+// the same environment for a given database path to avoid conflicts.
+// Each LmdbInstance holds an Arc<Env> clone, ensuring thread-safe shared access.
+static GLOBAL_ENVS: OnceLock<Mutex<HashMap<String, Arc<Env>>>> = OnceLock::new();
 
 pub struct LMDBStorage {
     individuals_db: LmdbInstance,
@@ -15,23 +25,47 @@ pub struct LMDBStorage {
 pub struct LmdbInstance {
     max_read_counter: u64,
     path: String,
-    mode: StorageMode,
-    db_handle: Result<DbHandle, MdbError>,
-    db_env: Result<Environment, MdbError>,
+    env: Arc<Env>,
     read_counter: u64,
 }
 
-impl Default for LmdbInstance {
-    fn default() -> Self {
-        LmdbInstance {
-            max_read_counter: 1000,
-            path: String::default(),
-            mode: StorageMode::ReadOnly,
-            db_handle: Err(MdbError::Panic),
-            db_env: Err(MdbError::Panic),
-            read_counter: 0,
-        }
+// Get or create a shared LMDB environment for the given path.
+// This function ensures that all LmdbInstance objects for the same path
+// share a single Environment, which is a requirement for correct LMDB operation
+// when multiple readers exist in the same process.
+fn get_or_create_env(path: &str) -> Arc<Env> {
+    let envs = GLOBAL_ENVS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut envs_map = envs.lock().unwrap();
+    
+    // Return existing environment if already created
+    if let Some(env) = envs_map.get(path) {
+        return env.clone();
     }
+    
+    // Create directory if it doesn't exist
+    if let Err(e) = fs::create_dir_all(path) {
+        error!("LMDB: failed to create directory path=[{}], err={:?}", path, e);
+    }
+    
+    // Open new environment with retry logic
+    let env = loop {
+        match unsafe {
+            EnvOpenOptions::new()
+                .map_size(10 * 1024 * 1024 * 1024) // 10GB initial size
+                .max_dbs(1)
+                .open(Path::new(path))
+        } {
+            Ok(env) => break Arc::new(env),
+            Err(e) => {
+                error!("LMDB: failed to open environment, path=[{}], err={:?}", path, e);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    };
+    
+    // Store environment in global registry
+    envs_map.insert(path.to_string(), env.clone());
+    env
 }
 
 struct LmdbIterator {
@@ -54,81 +88,72 @@ impl Iterator for LmdbIterator {
 }
 
 impl LmdbInstance {
-    pub fn new(path: &str, mode: StorageMode) -> Self {
+    /// Create a new LmdbInstance.
+    /// The environment is shared globally - multiple instances for the same path
+    /// will use the same underlying LMDB environment.
+    /// Database handle is NOT stored - it's opened per-transaction for thread safety.
+    pub fn new(path: &str, _mode: StorageMode) -> Self {
+        let env = get_or_create_env(path);
+        
+        // Try to initialize database (create_database is idempotent - succeeds if already exists)
+        if let Ok(mut wtxn) = env.write_txn() {
+            if let Ok(_db) = env.create_database::<Bytes, Bytes>(&mut wtxn, None) {
+                let _ = wtxn.commit();
+            }
+        }
+        
         LmdbInstance {
             max_read_counter: 1000,
             path: path.to_string(),
-            mode,
-            db_handle: Err(MdbError::Panic),
-            db_env: Err(MdbError::Panic),
+            env,
             read_counter: 0,
         }
     }
 
     pub fn iter(&mut self) -> Box<dyn Iterator<Item = Vec<u8>>> {
-        if self.db_env.is_err() {
-            self.open();
-        }
-
-        match &self.db_env {
-            Ok(env) => match &self.db_handle {
-                Ok(handle) => match env.get_reader() {
-                    Ok(txn) => {
-                        let db = txn.bind(handle);
-                        let cursor_result = db.new_cursor();
-                        match cursor_result {
-                            Ok(mut cursor) => {
-                                let mut keys = Vec::new();
-                                while let Ok(()) = cursor.to_next_item() {
-                                    if let Ok(key) = cursor.get_key::<Vec<u8>>() {
-                                        keys.push(key);
-                                    }
+        match self.env.read_txn() {
+            Ok(txn) => {
+                match self.env.open_database::<Bytes, Bytes>(&txn, None) {
+                    Ok(Some(db)) => {
+                        let mut keys = Vec::new();
+                        if let Ok(iter) = db.iter(&txn) {
+                            for item in iter {
+                                if let Ok((key, _)) = item {
+                                    keys.push(key.to_vec());
                                 }
-                                Box::new(LmdbIterator {
-                                    keys,
-                                    index: 0,
-                                })
-                            },
-                            Err(_) => Box::new(std::iter::empty()),
+                            }
                         }
+                        Box::new(LmdbIterator {
+                            keys,
+                            index: 0,
+                        })
                     },
-                    Err(_) => Box::new(std::iter::empty()),
-                },
-                Err(_) => Box::new(std::iter::empty()),
+                    Ok(None) => {
+                        error!("LMDB: database not found, path=[{}]", self.path);
+                        Box::new(std::iter::empty())
+                    },
+                    Err(e) => {
+                        error!("LMDB: failed to open database for iterator, path=[{}], err={:?}", self.path, e);
+                        Box::new(std::iter::empty())
+                    }
+                }
             },
-            Err(_) => Box::new(std::iter::empty()),
+            Err(e) => {
+                error!("LMDB: failed to create read transaction for iterator, path=[{}], err={:?}", self.path, e);
+                Box::new(std::iter::empty())
+            },
         }
     }
 
     pub fn open(&mut self) {
-        let flags = if self.mode == StorageMode::ReadOnly {
-            // MDB_NOLOCK (0x20000000) | MDB_RDONLY (0x20000) | MDB_NOMETASYNC (0x40000) | MDB_NOSYNC (0x10000)
-            EnvCreateFlags::from_bits_truncate(0x20000000 | 0x20000 | 0x40000 | 0x10000)
-        } else {
-            // MDB_NOLOCK (0x20000000) | MDB_NOMETASYNC (0x40000) | MDB_NOSYNC (0x10000)
-            EnvCreateFlags::from_bits_truncate(0x20000000 | 0x40000 | 0x10000)
-        };
-        
-        let env_builder = EnvBuilder::new().flags(flags);
-
-        let db_env = env_builder.open(&self.path, 0o644);
-
-        let db_handle = match &db_env {
-            Ok(env) => env.get_default_db(DbFlags::empty()),
-            Err(e) => {
-                error!("LMDB: fail opening read only environment, path=[{}], err={:?}", self.path, e);
-                Err(MdbError::Corrupted)
-            },
-        };
-
-        self.db_handle = db_handle;
-        self.db_env = db_env;
+        // Reset read counter - environment is already open and shared
         self.read_counter = 0;
+        info!("LMDBStorage: reset read counter for path=[{}]", self.path);
     }
 
     fn get_individual(&mut self, uri: &str, iraw: &mut Individual) -> StorageResult<()> {
-        if let Some(val) = self.get::<&[u8]>(uri) {
-            iraw.set_raw(val);
+        if let Some(val) = self.get_raw(uri) {
+            iraw.set_raw(&val);
 
             return if parse_raw(iraw).is_ok() {
                 StorageResult::Ok(())
@@ -142,80 +167,50 @@ impl LmdbInstance {
     }
 
     fn get_v(&mut self, key: &str) -> Option<String> {
-        self.get::<String>(key)
+        self.get_raw(key).and_then(|bytes| {
+            String::from_utf8(bytes).ok()
+        })
     }
 
     fn get_raw(&mut self, key: &str) -> Option<Vec<u8>> {
-        self.get::<Vec<u8>>(key)
-    }
-
-    pub fn get<T: FromMdbValue>(&mut self, key: &str) -> Option<T> {
-        if self.db_env.is_err() {
-            self.open();
-        }
-
         for _it in 0..2 {
-            let mut is_need_reopen = false;
-
             self.read_counter += 1;
             if self.read_counter > self.max_read_counter {
-                is_need_reopen = true;
+                warn!("db {} reset counter for key=[{}] (max counter reached)", self.path, key);
+                self.read_counter = 0;
             }
 
-            match &self.db_env {
-                Ok(env) => match &self.db_handle {
-                    Ok(handle) => match env.get_reader() {
-                        Ok(txn) => {
-                            let db = txn.bind(handle);
-
-                            match db.get::<T>(&key) {
-                                Ok(val) => {
-                                    return Some(val);
+            match self.env.read_txn() {
+                Ok(txn) => {
+                    match self.env.open_database::<Bytes, Bytes>(&txn, None) {
+                        Ok(Some(db)) => {
+                            match db.get(&txn, key.as_bytes()) {
+                                Ok(Some(val)) => {
+                                    return Some(val.to_vec());
                                 },
-                                Err(e) => match e {
-                                    MdbError::NotFound => {
-                                        return None;
-                                    },
-                                    _ => {
-                                        error!("LMDB: db.get failed for key=[{}], path=[{}], err={:?}", key, self.path, e);
-                                        return None;
-                                    },
+                                Ok(None) => {
+                                    return None;
+                                },
+                                Err(e) => {
+                                    error!("LMDB: db.get failed for key=[{}], path=[{}], err={:?}", key, self.path, e);
+                                    return None;
                                 },
                             }
                         },
-                        Err(e) => match e {
-                            MdbError::Other(c, _) => {
-                                if c == -30785 {
-                                    is_need_reopen = true;
-                                } else {
-                                    error!("LMDB: failed to create transaction for key=[{}], path=[{}], err={}", key, self.path, e);
-                                    return None;
-                                }
-                            },
-                            _ => {
-                                error!("LMDB: failed to create transaction for key=[{}], path=[{}], err={}", key, self.path, e);
-                            },
+                        Ok(None) => {
+                            error!("LMDB: database not found for key=[{}], path=[{}]", key, self.path);
+                            return None;
                         },
-                    },
-                    Err(e) => {
-                        error!("LMDB: db handle error for key=[{}], path=[{}], err={}", key, self.path, e);
-                        return None;
-                    },
+                        Err(e) => {
+                            error!("LMDB: failed to open database for key=[{}], path=[{}], err={:?}", key, self.path, e);
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
                 },
-                Err(e) => match e {
-                    MdbError::Panic => {
-                        is_need_reopen = true;
-                    },
-                    _ => {
-                        error!("LMDB: db environment error for key=[{}], path=[{}], err={}", key, self.path, e);
-                        return None;
-                    },
+                Err(e) => {
+                    error!("LMDB: failed to create read transaction for key=[{}], path=[{}], err={:?}", key, self.path, e);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 },
-            }
-
-            if is_need_reopen {
-                warn!("db {} reopen for key=[{}]", self.path, key);
-                self.open();
             }
         }
 
@@ -223,46 +218,35 @@ impl LmdbInstance {
     }
 
     pub fn count(&mut self) -> usize {
-        if self.db_env.is_err() {
-            self.open();
-        }
-
         for _it in 0..2 {
-            let mut is_need_reopen = false;
-
-            match &self.db_env {
-                Ok(env) => match env.stat() {
-                    Ok(stat) => {
-                        return stat.ms_entries;
-                    },
-                    Err(e) => match e {
-                        MdbError::Other(c, _) => {
-                            if c == -30785 {
-                                is_need_reopen = true;
-                            } else {
-                                error!("LMDB: fail read stat for path=[{}], err={}", self.path, e);
-                                return 0;
+            match self.env.read_txn() {
+                Ok(txn) => {
+                    match self.env.open_database::<Bytes, Bytes>(&txn, None) {
+                        Ok(Some(db)) => {
+                            match db.len(&txn) {
+                                Ok(count) => {
+                                    return count as usize;
+                                },
+                                Err(e) => {
+                                    error!("LMDB: failed to get count, path=[{}], err={:?}", self.path, e);
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                },
                             }
                         },
-                        _ => {
-                            error!("LMDB: fail to create transaction for stat read, path=[{}], err={}", self.path, e);
+                        Ok(None) => {
+                            error!("LMDB: database not found for count, path=[{}]", self.path);
+                            return 0;
                         },
-                    },
+                        Err(e) => {
+                            error!("LMDB: failed to open database for count, path=[{}], err={:?}", self.path, e);
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
                 },
-                Err(e) => match e {
-                    MdbError::Panic => {
-                        is_need_reopen = true;
-                    },
-                    _ => {
-                        error!("LMDB: db environment error while reading stat, path=[{}], err={}", self.path, e);
-                        return 0;
-                    },
+                Err(e) => {
+                    error!("LMDB: failed to create transaction for count, path=[{}], err={:?}", self.path, e);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 },
-            }
-
-            if is_need_reopen {
-                warn!("db {} reopen for stat read", self.path);
-                self.open();
             }
         }
 
@@ -270,41 +254,29 @@ impl LmdbInstance {
     }
 
     pub fn remove(&mut self, key: &str) -> bool {
-        if self.db_env.is_err() {
-            self.open();
-        }
-        remove_from_lmdb(&self.db_env, &self.db_handle, key, &self.path)
+        remove_from_lmdb(&self.env, key, &self.path)
     }
 
-    pub fn put<T: ToMdbValue>(&mut self, key: &str, val: T) -> bool {
-        if self.db_env.is_err() {
-            self.open();
-        }
-        put_kv_lmdb(&self.db_env, &self.db_handle, key, val, &self.path)
+    pub fn put(&mut self, key: &str, val: &[u8]) -> bool {
+        put_kv_lmdb(&self.env, key, val, &self.path)
     }
 }
 
 impl LMDBStorage {
-    pub fn new(db_path: &str, mode: StorageMode, max_read_counter_reopen: Option<u64>) -> LMDBStorage {
+    pub fn new(db_path: &str, mode: StorageMode, _max_read_counter_reopen: Option<u64>) -> LMDBStorage {
         LMDBStorage {
-            individuals_db: LmdbInstance {
-                max_read_counter: max_read_counter_reopen.unwrap_or(u32::MAX as u64),
-                path: db_path.to_owned() + "/lmdb-individuals/",
-                mode: mode.clone(),
-                ..Default::default()
-            },
-            tickets_db: LmdbInstance {
-                max_read_counter: max_read_counter_reopen.unwrap_or(u32::MAX as u64),
-                path: db_path.to_owned() + "/lmdb-tickets/",
-                mode: mode.clone(),
-                ..Default::default()
-            },
-            az_db: LmdbInstance {
-                max_read_counter: max_read_counter_reopen.unwrap_or(u32::MAX as u64),
-                path: db_path.to_owned() + "/acl-indexes/",
-                mode: mode.clone(),
-                ..Default::default()
-            },
+            individuals_db: LmdbInstance::new(
+                &(db_path.to_owned() + "/lmdb-individuals/"),
+                mode.clone()
+            ),
+            tickets_db: LmdbInstance::new(
+                &(db_path.to_owned() + "/lmdb-tickets/"),
+                mode.clone()
+            ),
+            az_db: LmdbInstance::new(
+                &(db_path.to_owned() + "/acl-indexes/"),
+                mode.clone()
+            ),
         }
     }
 
@@ -348,7 +320,7 @@ impl Storage for LMDBStorage {
 
     fn put_value(&mut self, storage: StorageId, key: &str, val: &str) -> crate::common::StorageResult<()> {
         let db_instance = self.get_db_instance(&storage);
-        if put_kv_lmdb(&db_instance.db_env, &db_instance.db_handle, key, val.as_bytes(), &db_instance.path) {
+        if put_kv_lmdb(&db_instance.env, key, val.as_bytes(), &db_instance.path) {
             crate::common::StorageResult::Ok(())
         } else {
             crate::common::StorageResult::Error("Failed to put value".to_string())
@@ -357,7 +329,7 @@ impl Storage for LMDBStorage {
 
     fn put_raw_value(&mut self, storage: StorageId, key: &str, val: Vec<u8>) -> crate::common::StorageResult<()> {
         let db_instance = self.get_db_instance(&storage);
-        if put_kv_lmdb(&db_instance.db_env, &db_instance.db_handle, key, val.as_slice(), &db_instance.path) {
+        if put_kv_lmdb(&db_instance.env, key, val.as_slice(), &db_instance.path) {
             crate::common::StorageResult::Ok(())
         } else {
             crate::common::StorageResult::Error("Failed to put raw value".to_string())
@@ -366,7 +338,7 @@ impl Storage for LMDBStorage {
 
     fn remove_value(&mut self, storage: StorageId, key: &str) -> crate::common::StorageResult<()> {
         let db_instance = self.get_db_instance(&storage);
-        if remove_from_lmdb(&db_instance.db_env, &db_instance.db_handle, key, &db_instance.path) {
+        if remove_from_lmdb(&db_instance.env, key, &db_instance.path) {
             crate::common::StorageResult::Ok(())
         } else {
             crate::common::StorageResult::NotFound
@@ -379,98 +351,82 @@ impl Storage for LMDBStorage {
     }
 }
 
-fn remove_from_lmdb(db_env: &Result<Environment, MdbError>, db_handle: &Result<DbHandle, MdbError>, key: &str, path: &str) -> bool {
-    match db_env {
-        Ok(env) => match env.new_transaction() {
-            Ok(txn) => match db_handle {
-                Ok(handle) => {
-                    let db = txn.bind(handle);
-                    if let Err(e) = db.del(&key) {
-                        error!("LMDB: failed to remove key=[{}] from path=[{}], err={}", key, path, e);
-                        return false;
-                    }
-
-                    if let Err(e) = txn.commit() {
-                        if let MdbError::Other(c, _) = e {
-                            if c == -30792 && grow_db(db_env, path) {
-                                return remove_from_lmdb(db_env, db_handle, key, path);
+fn remove_from_lmdb(env: &Arc<Env>, key: &str, path: &str) -> bool {
+    match env.write_txn() {
+        Ok(mut txn) => {
+            match env.open_database::<Bytes, Bytes>(&txn, None) {
+                Ok(Some(db)) => {
+                    match db.delete(&mut txn, key.as_bytes()) {
+                        Ok(true) => {
+                            match txn.commit() {
+                                Ok(_) => true,
+                                Err(e) => {
+                                    error!("LMDB: failed to commit removal for key=[{}], path=[{}], err={:?}", key, path, e);
+                                    false
+                                }
                             }
+                        },
+                        Ok(false) => {
+                            // Key not found
+                            false
+                        },
+                        Err(e) => {
+                            error!("LMDB: failed to remove key=[{}] from path=[{}], err={:?}", key, path, e);
+                            false
                         }
-                        error!("LMDB: failed to commit removal for key=[{}], path=[{}], err={}", key, path, e);
-                        return false;
                     }
-                    true
                 },
-                Err(e) => {
-                    error!("LMDB: db handle error while removing key=[{}], path=[{}], err={}", key, path, e);
+                Ok(None) => {
+                    error!("LMDB: database not found while removing key=[{}], path=[{}]", key, path);
                     false
                 },
-            },
-            Err(e) => {
-                error!("LMDB: failed to create transaction while removing key=[{}], path=[{}], err={}", key, path, e);
-                false
-            },
-        },
-        Err(e) => {
-            error!("LMDB: db environment error while removing key=[{}], path=[{}], err={}", key, path, e);
-            false
-        },
-    }
-}
-
-fn put_kv_lmdb<T: ToMdbValue>(db_env: &Result<Environment, MdbError>, db_handle: &Result<DbHandle, MdbError>, key: &str, val: T, path: &str) -> bool {
-    match db_env {
-        Ok(env) => match env.new_transaction() {
-            Ok(txn) => match db_handle {
-                Ok(handle) => {
-                    let db = txn.bind(handle);
-                    if let Err(e) = db.set(&key, &val) {
-                        error!("LMDB: failed to put key=[{}] into path=[{}], err={}", key, path, e);
-                        return false;
-                    }
-
-                    if let Err(e) = txn.commit() {
-                        if let MdbError::Other(c, _) = e {
-                            if c == -30792 && grow_db(db_env, path) {
-                                return put_kv_lmdb(db_env, db_handle, key, val, path);
-                            }
-                        }
-                        error!("LMDB: failed to commit put for key=[{}], path=[{}], err={}", key, path, e);
-                        return false;
-                    }
-                    true
-                },
                 Err(e) => {
-                    error!("LMDB: db handle error while putting key=[{}], path=[{}], err={}", key, path, e);
+                    error!("LMDB: failed to open database while removing key=[{}], path=[{}], err={:?}", key, path, e);
                     false
-                },
-            },
-            Err(e) => {
-                error!("LMDB: failed to create transaction while putting key=[{}], path=[{}], err={}", key, path, e);
-                false
-            },
-        },
-        Err(e) => {
-            error!("LMDB: db environment error while putting key=[{}], path=[{}], err={}", key, path, e);
-            false
-        },
-    }
-}
-
-fn grow_db(db_env: &Result<Environment, MdbError>, path: &str) -> bool {
-    match db_env {
-        Ok(env) => {
-            if let Ok(stat) = env.info() {
-                let new_size = stat.me_mapsize + 100 * 10_048_576;
-                if env.set_mapsize(new_size).is_ok() {
-                    info!("success grow db, new size = {}", new_size);
-                    return true;
                 }
             }
         },
         Err(e) => {
-            error!("LMDB: db environment error while growing db, path=[{}], err={}", path, e);
-        },
+            error!("LMDB: failed to create write transaction while removing key=[{}], path=[{}], err={:?}", key, path, e);
+            false
+        }
     }
-    false
+}
+
+fn put_kv_lmdb(env: &Arc<Env>, key: &str, val: &[u8], path: &str) -> bool {
+    match env.write_txn() {
+        Ok(mut txn) => {
+            match env.open_database::<Bytes, Bytes>(&txn, None) {
+                Ok(Some(db)) => {
+                    match db.put(&mut txn, key.as_bytes(), val) {
+                        Ok(_) => {
+                            match txn.commit() {
+                                Ok(_) => true,
+                                Err(e) => {
+                                    error!("LMDB: failed to commit put for key=[{}], path=[{}], err={:?}", key, path, e);
+                                    false
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            error!("LMDB: failed to put key=[{}] into path=[{}], err={:?}", key, path, e);
+                            false
+                        }
+                    }
+                },
+                Ok(None) => {
+                    error!("LMDB: database not found while putting key=[{}], path=[{}]", key, path);
+                    false
+                },
+                Err(e) => {
+                    error!("LMDB: failed to open database while putting key=[{}], path=[{}], err={:?}", key, path, e);
+                    false
+                }
+            }
+        },
+        Err(e) => {
+            error!("LMDB: failed to create write transaction while putting key=[{}], path=[{}], err={:?}", key, path, e);
+            false
+        }
+    }
 }
