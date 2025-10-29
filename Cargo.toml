@@ -1,6 +1,6 @@
 [package]
 name = "v-storage"
-version = "0.3.0-heed+mdbx"
+version = "0.3.1-heed+mdbx"
 authors = ["itiu <ValeriyBushenev@gmail.com>"]
 edition = "2024"
 description = "Storage layer for the veda platform"

@@ -1,13 +1,61 @@
 use v_individual_model::onto::individual::Individual;
 use v_individual_model::onto::parser::parse_raw;
-use crate::common::{Storage, StorageId, StorageMode, StorageResult};
-use libmdbx::{Database, DatabaseOptions, Mode, ReadWriteOptions, SyncMode, WriteFlags, WriteMap};
+use crate::common::{Storage, StorageId, StorageMode, StorageResult, ZeroCopyStorage};
+use libmdbx::{Database, DatabaseOptions, Mode, ReadWriteOptions, SyncMode, WriteFlags, WriteMap, Transaction, RO, RW};
+use std::borrow::Cow;
 use std::iter::Iterator;
 use std::path::Path;
 use std::fs;
 use std::sync::{Arc, OnceLock};
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+// Trait for types that can be deserialized from MDB value
+// Similar to heed's BytesDecode but simpler for our use case
+pub trait FromMdbValue: Sized {
+    fn from_mdb_value(bytes: &[u8]) -> Option<Self>;
+}
+
+// Implement FromMdbValue for common types
+impl FromMdbValue for Vec<u8> {
+    fn from_mdb_value(bytes: &[u8]) -> Option<Self> {
+        Some(bytes.to_vec())
+    }
+}
+
+impl FromMdbValue for String {
+    fn from_mdb_value(bytes: &[u8]) -> Option<Self> {
+        String::from_utf8(bytes.to_vec()).ok()
+    }
+}
+
+impl FromMdbValue for i64 {
+    fn from_mdb_value(bytes: &[u8]) -> Option<Self> {
+        let arr: &[u8; 8] = bytes.try_into().ok()?;
+        Some(i64::from_le_bytes(*arr))
+    }
+}
+
+impl FromMdbValue for u64 {
+    fn from_mdb_value(bytes: &[u8]) -> Option<Self> {
+        let arr: &[u8; 8] = bytes.try_into().ok()?;
+        Some(u64::from_le_bytes(*arr))
+    }
+}
+
+impl FromMdbValue for i32 {
+    fn from_mdb_value(bytes: &[u8]) -> Option<Self> {
+        let arr: &[u8; 4] = bytes.try_into().ok()?;
+        Some(i32::from_le_bytes(*arr))
+    }
+}
+
+impl FromMdbValue for u32 {
+    fn from_mdb_value(bytes: &[u8]) -> Option<Self> {
+        let arr: &[u8; 4] = bytes.try_into().ok()?;
+        Some(u32::from_le_bytes(*arr))
+    }
+}
 
 // Global registry of shared databases by path.
 // This is critical for MDBX: multiple instances in the same process must share
@@ -143,7 +191,41 @@ impl MdbxInstance {
         info!("MDBXStorage: reset read counter for path=[{}]", self.path);
     }
 
-    fn get_individual(&mut self, uri: &str, iraw: &mut Individual) -> StorageResult<()> {
+    /// Create a read-only transaction for zero-copy operations
+    /// Use this with get_with_txn to avoid data copying
+    pub fn begin_ro_txn(&self) -> Result<Transaction<'_, RO, WriteMap>, libmdbx::Error> {
+        self.db.begin_ro_txn()
+    }
+
+    /// Create a read-write transaction
+    pub fn begin_rw_txn(&self) -> Result<Transaction<'_, RW, WriteMap>, libmdbx::Error> {
+        self.db.begin_rw_txn()
+    }
+
+    /// Get data with zero-copy using existing transaction
+    /// Returns Cow::Borrowed when possible (no copying), Cow::Owned when data is dirty
+    pub fn get_with_txn<'tx>(&self, txn: &'tx Transaction<RO, WriteMap>, key: &str) 
+        -> Option<Cow<'tx, [u8]>> 
+    {
+        match txn.open_table(None) {
+            Ok(table) => {
+                match txn.get::<Cow<[u8]>>(&table, key.as_bytes()) {
+                    Ok(Some(val)) => Some(val),
+                    Ok(None) => None,
+                    Err(e) => {
+                        error!("MDBX: get_with_txn failed for key=[{}], path=[{}], err={:?}", key, self.path, e);
+                        None
+                    },
+                }
+            },
+            Err(e) => {
+                error!("MDBX: failed to open table in get_with_txn for key=[{}], path=[{}], err={:?}", key, self.path, e);
+                None
+            }
+        }
+    }
+
+    pub fn get_individual(&mut self, uri: &str, iraw: &mut Individual) -> StorageResult<()> {
         if let Some(val) = self.get_raw(uri) {
             iraw.set_raw(&val);
 
@@ -158,13 +240,15 @@ impl MdbxInstance {
         StorageResult::NotFound
     }
 
-    fn get_v(&mut self, key: &str) -> Option<String> {
-        self.get_raw(key).and_then(|bytes| {
-            String::from_utf8(bytes).ok()
-        })
+    pub fn get_v(&mut self, key: &str) -> Option<String> {
+        self.get::<String>(key)
     }
 
-    fn get_raw(&mut self, key: &str) -> Option<Vec<u8>> {
+    pub fn get_raw(&mut self, key: &str) -> Option<Vec<u8>> {
+        self.get::<Vec<u8>>(key)
+    }
+
+    pub fn get<T: FromMdbValue>(&mut self, key: &str) -> Option<T> {
         for _it in 0..2 {
             self.read_counter += 1;
             if self.read_counter > self.max_read_counter {
@@ -178,7 +262,7 @@ impl MdbxInstance {
                         Ok(table) => {
                             match txn.get::<Vec<u8>>(&table, key.as_bytes()) {
                                 Ok(Some(val)) => {
-                                    return Some(val);
+                                    return T::from_mdb_value(&val);
                                 },
                                 Ok(None) => {
                                     return None;
@@ -242,6 +326,31 @@ impl MdbxInstance {
     }
 
     pub fn put(&mut self, key: &str, val: &[u8]) -> bool {
+        put_kv_mdbx(&self.db, key, val, &self.path)
+    }
+}
+
+// Implement ZeroCopyStorage trait for MdbxInstance
+impl ZeroCopyStorage for MdbxInstance {
+    type Transaction<'tx> = Transaction<'tx, RO, WriteMap>;
+    
+    fn begin_ro_txn(&self) -> Result<Self::Transaction<'_>, Box<dyn std::error::Error>> {
+        self.db.begin_ro_txn().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    }
+    
+    fn get_with_txn<'tx>(&self, txn: &'tx Self::Transaction<'tx>, key: &str) -> Option<Cow<'tx, [u8]>> {
+        match txn.open_table(None) {
+            Ok(table) => {
+                match txn.get::<Cow<[u8]>>(&table, key.as_bytes()) {
+                    Ok(Some(val)) => Some(val),
+                    _ => None,
+                }
+            },
+            _ => None,
+        }
+    }
+    
+    fn put(&mut self, key: &str, val: &[u8]) -> bool {
         put_kv_mdbx(&self.db, key, val, &self.path)
     }
 }

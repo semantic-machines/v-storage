@@ -1,4 +1,5 @@
 use v_individual_model::onto::individual::Individual;
+use std::borrow::Cow;
 
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub enum StorageMode {
@@ -152,4 +153,21 @@ pub trait StorageDispatcher {
     {
         self.with_storage(StorageResult::NotReady, operation)
     }
+}
+
+/// Trait for zero-copy database operations
+/// Provides unified interface for LMDB and MDBX with minimal copying
+pub trait ZeroCopyStorage {
+    /// Transaction type that holds database handle
+    type Transaction<'tx> where Self: 'tx;
+    
+    /// Create read-only transaction for zero-copy operations
+    fn begin_ro_txn(&self) -> Result<Self::Transaction<'_>, Box<dyn std::error::Error>>;
+    
+    /// Get data with zero-copy using existing transaction
+    /// Returns Cow::Borrowed when no copying is needed, Cow::Owned when necessary
+    fn get_with_txn<'tx>(&self, txn: &'tx Self::Transaction<'tx>, key: &str) -> Option<Cow<'tx, [u8]>>;
+    
+    /// Put data into storage (mutable operation)
+    fn put(&mut self, key: &str, val: &[u8]) -> bool;
 }

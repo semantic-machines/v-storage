@@ -10,6 +10,9 @@ A flexible storage abstraction library for the Veda platform. Provides unified i
 
 - **Multiple Storage Backends**: Memory, LMDB, MDBX, Tarantool (TTStorage), Remote storage
 - **Unified API**: Common `Storage` trait for all backends
+- **🔥 Zero-Copy Operations**: Avoid unnecessary data copying with `Cow<[u8]>` for LMDB and MDBX
+- **⚡ Optimized Primitives**: Direct byte conversion without intermediate buffers for `i64`, `u64`, `i32`, `u32`
+- **🔗 Unified Transaction API**: Identical interface for LMDB and MDBX via `ZeroCopyStorage` trait
 - **Three Architecture Patterns**: Dynamic dispatch, generic containers, enum dispatch
 - **Individual Support**: Native support for Veda platform Individual objects
 - **Zero-cost Abstractions**: Compile-time optimization options with minimal overhead
@@ -293,10 +296,72 @@ let storage = VStorage::builder()
     .build()?;
 ```
 
+### Zero-Copy API (LMDB & MDBX) ⚡
+
+For maximum performance, use the zero-copy API that avoids data copying:
+
+```rust
+use v_storage::lmdb_storage::LmdbInstance;
+use v_storage::mdbx_storage::MdbxInstance;
+use v_storage::common::{StorageMode, ZeroCopyStorage};
+
+// Works identically for both LMDB and MDBX!
+let mut storage = MdbxInstance::new("/path/to/db", StorageMode::ReadWrite);
+
+// Put data
+storage.put("key", b"value");
+
+// Zero-copy read using transaction
+let txn = storage.begin_ro_txn()?;
+if let Some(data) = storage.get_with_txn(&txn, "key") {
+    // data is Cow<[u8]> - usually Borrowed (no copying!)
+    match data {
+        std::borrow::Cow::Borrowed(slice) => {
+            println!("Zero-copy read: {} bytes", slice.len());
+            // Work with data without copying
+        },
+        std::borrow::Cow::Owned(vec) => {
+            println!("Had to copy (data was modified)");
+        }
+    }
+}
+// Transaction drops, references are no longer valid
+```
+
+**Benefits:**
+- **LMDB**: Always returns `Cow::Borrowed` - pure zero-copy
+- **MDBX**: Returns `Cow::Borrowed` when possible, `Cow::Owned` only for modified data
+- **Unified**: Same API for both databases using `ZeroCopyStorage` trait
+- **Optimized**: Primitive types (`i64`, `u64`, `i32`, `u32`) read without intermediate buffer allocation
+
+**Generic Zero-Copy API:**
+
+Both LMDB and MDBX implement the `ZeroCopyStorage` trait for unified access:
+
+```rust
+fn read_data<S: ZeroCopyStorage>(storage: &S, key: &str) {
+    if let Ok(txn) = storage.begin_ro_txn() {
+        if let Some(data) = storage.get_with_txn(&txn, key) {
+            // Works with both LMDB and MDBX!
+            println!("Read {} bytes", data.len());
+        }
+    }
+}
+
+// Use with either database
+let lmdb = LmdbInstance::new("/path/lmdb", StorageMode::ReadWrite);
+let mdbx = MdbxInstance::new("/path/mdbx", StorageMode::ReadWrite);
+
+read_data(&lmdb, "key");  // Same code
+read_data(&mdbx, "key");  // Same code
+```
+
 ## 📚 Examples
 
 The [`examples/`](examples/) directory contains comprehensive examples:
 
+- **[zero_copy_api.rs](examples/zero_copy_api.rs)** - Zero-copy operations with LMDB/MDBX ⚡
+- **[unified_api_simple.rs](examples/unified_api_simple.rs)** - Unified API for both databases 🔗
 - **[basic_usage.rs](examples/basic_usage.rs)** - Basic operations and API usage
 - **[storage_types.rs](examples/storage_types.rs)** - Comparison of different storage types
 - **[factory_patterns.rs](examples/factory_patterns.rs)** - Various construction patterns
@@ -305,6 +370,11 @@ The [`examples/`](examples/) directory contains comprehensive examples:
 
 Run examples:
 ```bash
+# New zero-copy examples
+cargo run --example zero_copy_api
+cargo run --example unified_api_simple
+
+# Other examples
 cargo run --example basic_usage
 cargo run --example storage_types
 cargo run --example factory_patterns
@@ -319,6 +389,9 @@ cargo run --example mdbx_usage
 ```bash
 # Basic build
 cargo build
+
+# Build all examples
+cargo build --examples
 
 # With all features
 cargo build --features "tt_2 tokio_0_2"
@@ -437,8 +510,13 @@ A: Storage instances are not thread-safe by default. Use appropriate synchroniza
 A: The library returns `StorageResult::Error` for network issues. Implement retry logic in your application.
 
 **Q: Should I use LMDB or MDBX?**
-A: MDBX is a modern fork of LMDB with improved performance, better reliability, and additional features. For new projects, MDBX is recommended. LMDB remains supported for compatibility with existing systems.
+A: MDBX is a modern fork of LMDB with improved performance, better reliability, and additional features. For new projects, MDBX is recommended. LMDB remains supported for compatibility with existing systems. Both support zero-copy operations with identical API.
+
+**Q: What are the performance optimizations?**
+A: The library includes several optimizations:
+- Zero-copy reads using `Cow<[u8]>` for LMDB/MDBX (avoid data copying when possible)
+- Direct byte conversion for primitive types without intermediate buffer allocation
+- Transaction-based API for efficient batch operations
+- Unified interface allows code reuse between LMDB and MDBX
 
 ---
-
-**Built with ❤️ for the Veda platform** 
