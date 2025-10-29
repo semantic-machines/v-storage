@@ -4,11 +4,11 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![Build Status](https://img.shields.io/badge/build-passing-green.svg)](https://github.com/your-org/v-storage)
 
-A flexible storage abstraction library for the Veda platform. Provides unified interface for different storage backends including memory, LMDB, Tarantool, and remote storage.
+A flexible storage abstraction library for the Veda platform. Provides unified interface for different storage backends including memory, LMDB, MDBX, Tarantool, and remote storage.
 
 ## 🚀 Features
 
-- **Multiple Storage Backends**: Memory, LMDB, Tarantool (TTStorage), Remote storage
+- **Multiple Storage Backends**: Memory, LMDB, MDBX, Tarantool (TTStorage), Remote storage
 - **Unified API**: Common `Storage` trait for all backends
 - **Three Architecture Patterns**: Dynamic dispatch, generic containers, enum dispatch
 - **Individual Support**: Native support for Veda platform Individual objects
@@ -83,7 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Storage Backends
 
 - **Memory Storage** - In-memory HashMap-based storage
-- **LMDB Storage** - Lightning Memory-Mapped Database  
+- **LMDB Storage** - Lightning Memory-Mapped Database (heed 0.22.0)
+- **MDBX Storage** - Modern fork of LMDB with improved performance (libmdbx 0.6.3)
 - **Tarantool Storage** - In-memory NoSQL database
 - **Remote Storage** - Network-based storage client
 
@@ -121,16 +122,30 @@ storage.count(StorageId::Individuals)?;
 ### Factory Patterns
 
 ```rust
-// Builder Pattern
+// Builder Pattern - LMDB
 let storage = VStorage::builder()
     .lmdb("/path/to/db", StorageMode::ReadWrite, None)
     .build()?;
 
+// Builder Pattern - MDBX (recommended)
+let storage = VStorage::builder()
+    .mdbx("/path/to/db", StorageMode::ReadWrite, None)
+    .build()?;
+
 // Provider Pattern  
 let storage = StorageProvider::memory();
+let storage = StorageProvider::mdbx("/path/to/db", StorageMode::ReadWrite, None);
 
 // Config Pattern
 let config = StorageConfig::Memory;
+let storage = VStorage::from_config(config)?;
+
+// Config Pattern - MDBX
+let config = StorageConfig::Mdbx {
+    path: "/path/to/db".to_string(),
+    mode: StorageMode::ReadWrite,
+    max_read_counter_reopen: None,
+};
 let storage = VStorage::from_config(config)?;
 ```
 
@@ -248,6 +263,21 @@ let storage = VStorage::builder()
     .build()?;
 ```
 
+### MDBX Storage
+```rust
+// Modern LMDB alternative with better performance
+let storage = VStorage::builder()
+    .mdbx("/path/to/database", StorageMode::ReadWrite, None)
+    .build()?;
+
+// Or use generic version for static dispatch
+let storage = StorageProvider::mdbx_generic(
+    "/path/to/database", 
+    StorageMode::ReadWrite, 
+    None
+);
+```
+
 ### Tarantool Storage
 ```rust
 // Requires tt_2 or tt_3 feature
@@ -271,6 +301,7 @@ The [`examples/`](examples/) directory contains comprehensive examples:
 - **[storage_types.rs](examples/storage_types.rs)** - Comparison of different storage types
 - **[factory_patterns.rs](examples/factory_patterns.rs)** - Various construction patterns
 - **[individual_operations.rs](examples/individual_operations.rs)** - Working with Individual objects
+- **[mdbx_usage.rs](examples/mdbx_usage.rs)** - MDBX storage usage patterns
 
 Run examples:
 ```bash
@@ -278,6 +309,7 @@ cargo run --example basic_usage
 cargo run --example storage_types
 cargo run --example factory_patterns
 cargo run --example individual_operations
+cargo run --example mdbx_usage
 ```
 
 ## 🛠️ Development
@@ -354,7 +386,8 @@ cargo test --release
 
 ### Optional Requirements
 
-- **LMDB**: System LMDB libraries for LMDBStorage
+- **LMDB**: System LMDB libraries for LMDBStorage (heed 0.22.0)
+- **MDBX**: libmdbx 0.6.3 for MDBXStorage - modern LMDB fork with better performance
 - **Tarantool**: Running Tarantool instance for TTStorage
 - **Network**: Connectivity for RemoteStorage
 
@@ -386,6 +419,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **[Veda Platform](https://github.com/semantic-machines/veda)** - Semantic data management platform
 - **[v-individual-model](https://crates.io/crates/v-individual-model)** - Individual object model
 - **[LMDB](https://symas.com/lmdb/)** - Lightning Memory-Mapped Database
+- **[libmdbx](https://github.com/erthink/libmdbx)** - Modern LMDB fork with better performance and reliability
 - **[Tarantool](https://www.tarantool.io/)** - In-memory database and application server
 
 ## 💡 FAQ
@@ -401,6 +435,9 @@ A: Storage instances are not thread-safe by default. Use appropriate synchroniza
 
 **Q: How do I handle network failures with RemoteStorage?**
 A: The library returns `StorageResult::Error` for network issues. Implement retry logic in your application.
+
+**Q: Should I use LMDB or MDBX?**
+A: MDBX is a modern fork of LMDB with improved performance, better reliability, and additional features. For new projects, MDBX is recommended. LMDB remains supported for compatibility with existing systems.
 
 ---
 

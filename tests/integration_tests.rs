@@ -267,4 +267,169 @@ fn test_empty_storage_behavior() {
     // Test with memory storage
     let mut memory_storage = VStorage::new(Box::new(MemoryStorage::new()));
     assert_eq!(memory_storage.get_individual("nonexistent", &mut individual), StorageResult::NotFound);
+}
+
+#[test]
+fn test_mdbx_storage_basic() {
+    let temp_dir = format!("/tmp/test-mdbx-integration-basic-{}", std::process::id());
+    let mut storage = MDBXStorage::new(&temp_dir, StorageMode::ReadWrite, None);
+    
+    // Test basic put/get
+    assert!(storage.put_value(StorageId::Individuals, "test:1", "value1").is_ok());
+    
+    let result = storage.get_value(StorageId::Individuals, "test:1");
+    assert!(result.is_ok());
+    if let StorageResult::Ok(value) = result {
+        assert_eq!(value, "value1");
+    }
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mdbx_storage_factory_integration() {
+    let temp_dir = format!("/tmp/test-mdbx-integration-factory-{}", std::process::id());
+    
+    // Test Builder pattern
+    let builder_result = StorageBuilder::new()
+        .mdbx(&temp_dir, StorageMode::ReadWrite, None)
+        .build();
+    assert!(builder_result.is_ok(), "Builder pattern failed for MDBX");
+    
+    // Test Provider pattern
+    let mut provider_storage = StorageProvider::mdbx(&temp_dir, StorageMode::ReadWrite, None);
+    assert!(provider_storage.put_value(StorageId::Individuals, "key1", "value1").is_ok());
+    
+    // Test VStorage with MDBX
+    let mut vstorage = StorageProvider::vstorage_mdbx(&temp_dir, StorageMode::ReadWrite, None);
+    assert!(vstorage.put_value(StorageId::Individuals, "key2", "value2").is_ok());
+    
+    // Test Generic MDBX
+    let mut generic_storage = StorageProvider::mdbx_generic(&temp_dir, StorageMode::ReadWrite, None);
+    assert!(generic_storage.put_value(StorageId::Individuals, "key3", "value3").is_ok());
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mdbx_enum_storage() {
+    let temp_dir = format!("/tmp/test-mdbx-integration-enum-{}", std::process::id());
+    let mut enum_storage = VStorageEnum::mdbx(&temp_dir, StorageMode::ReadWrite, None);
+    
+    // Test operations
+    assert!(enum_storage.put_value(StorageId::Individuals, "enum:1", "enum_value").is_ok());
+    
+    let result = enum_storage.get_value(StorageId::Individuals, "enum:1");
+    assert!(result.is_ok());
+    if let StorageResult::Ok(value) = result {
+        assert_eq!(value, "enum_value");
+    }
+    
+    // Test count
+    let count_result = enum_storage.count(StorageId::Individuals);
+    assert!(count_result.is_ok());
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mdbx_all_storage_types() {
+    let temp_dir = format!("/tmp/test-mdbx-integration-all-types-{}", std::process::id());
+    let mut storage = MDBXStorage::new(&temp_dir, StorageMode::ReadWrite, None);
+    
+    // Test all StorageId types
+    let test_data = vec![
+        (StorageId::Individuals, "ind:test", "individual_value"),
+        (StorageId::Tickets, "ticket:test", "ticket_value"),
+        (StorageId::Az, "az:test", "az_value"),
+    ];
+    
+    for (storage_type, key, value) in &test_data {
+        assert!(storage.put_value(storage_type.clone(), key, value).is_ok());
+        
+        let get_result = storage.get_value(storage_type.clone(), key);
+        assert!(get_result.is_ok());
+        if let StorageResult::Ok(retrieved_value) = get_result {
+            assert_eq!(retrieved_value, *value);
+        }
+    }
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mdbx_raw_data_operations() {
+    let temp_dir = format!("/tmp/test-mdbx-integration-raw-{}", std::process::id());
+    let mut storage = MDBXStorage::new(&temp_dir, StorageMode::ReadWrite, None);
+    
+    // Test with binary data
+    let binary_data = vec![0u8, 1, 2, 3, 255, 128, 64];
+    assert!(storage.put_raw_value(StorageId::Individuals, "binary:1", binary_data.clone()).is_ok());
+    
+    let result = storage.get_raw_value(StorageId::Individuals, "binary:1");
+    assert!(result.is_ok());
+    if let StorageResult::Ok(retrieved_data) = result {
+        assert_eq!(retrieved_data, binary_data);
+    }
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mdbx_individual_workflow() {
+    let temp_dir = format!("/tmp/test-mdbx-integration-individual-{}", std::process::id());
+    let mut storage = MDBXStorage::new(&temp_dir, StorageMode::ReadWrite, None);
+    let mut individual = Individual::default();
+    
+    // Test with valid Individual data
+    let valid_data = r#"{"@":"test:person","rdf:type":[{"type":"Uri","data":"test:Person"}],"rdfs:label":[{"type":"String","data":"Test Person"}]}"#;
+    assert!(storage.put_value(StorageId::Individuals, "test:person", valid_data).is_ok());
+    
+    // Try to read as Individual
+    let ind_result = storage.get_individual(StorageId::Individuals, "test:person", &mut individual);
+    assert!(ind_result == StorageResult::Ok(()) || ind_result == StorageResult::UnprocessableEntity,
+            "Expected Ok or UnprocessableEntity, got: {:?}", ind_result);
+    
+    // Test with invalid data
+    let invalid_data = "not valid json";
+    assert!(storage.put_value(StorageId::Individuals, "test:invalid", invalid_data).is_ok());
+    
+    let invalid_ind_result = storage.get_individual(StorageId::Individuals, "test:invalid", &mut individual);
+    assert_eq!(invalid_ind_result, StorageResult::UnprocessableEntity);
+    
+    // Test with non-existent individual
+    assert_eq!(storage.get_individual(StorageId::Individuals, "test:nonexistent", &mut individual), 
+               StorageResult::NotFound);
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mdbx_config_pattern() {
+    let temp_dir = format!("/tmp/test-mdbx-integration-config-{}", std::process::id());
+    
+    let config = StorageConfig::Mdbx {
+        path: temp_dir.clone(),
+        mode: StorageMode::ReadWrite,
+        max_read_counter_reopen: None,
+    };
+    
+    let storage_result = VStorage::from_config(config);
+    assert!(storage_result.is_ok(), "Failed to create MDBX storage from config");
+    
+    if let Ok(mut storage) = storage_result {
+        assert!(storage.put_value(StorageId::Individuals, "config:test", "config_value").is_ok());
+        
+        let get_result = storage.get_value(StorageId::Individuals, "config:test");
+        assert!(get_result.is_ok());
+    }
+    
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_dir);
 } 

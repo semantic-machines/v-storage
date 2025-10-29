@@ -1,6 +1,6 @@
 [package]
 name = "v-storage"
-version = "0.2.0-heed"
+version = "0.2.0-heed+mdbx"
 authors = ["itiu <ValeriyBushenev@gmail.com>"]
 edition = "2024"
 description = "Storage layer for the veda platform"
@@ -28,6 +28,7 @@ v-individual-model = "0.2.1"
 
 v_authorization = "=0.5.1"
 heed = "0.22.0"
+libmdbx = "0.6.3"
 
 nng = "1.0.1"
 log = "0.4"

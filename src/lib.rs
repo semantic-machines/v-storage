@@ -4,6 +4,7 @@ extern crate log;
 pub mod common;
 pub mod memory_storage;
 pub mod lmdb_storage;
+pub mod mdbx_storage;
 pub mod remote_storage_client;
 pub mod vstorage;
 #[cfg(any(feature = "tt_2", feature = "tt_3"))]
@@ -18,8 +19,9 @@ pub mod storage_factory;
 pub use common::{Storage, StorageId, StorageMode, StorageResult, StorageDispatcher};
 pub use memory_storage::MemoryStorage;
 pub use lmdb_storage::LMDBStorage;
+pub use mdbx_storage::MDBXStorage;
 pub use remote_storage_client::StorageROClient;
-pub use vstorage::{VStorage, VStorageGeneric, VStorageEnum, VMemoryStorage, VLMDBStorage, VRemoteStorage};
+pub use vstorage::{VStorage, VStorageGeneric, VStorageEnum, VMemoryStorage, VLMDBStorage, VMDBXStorage, VRemoteStorage};
 #[cfg(any(feature = "tt_2", feature = "tt_3"))]
 pub use tt_storage::TTStorage;
 #[cfg(any(feature = "tt_2", feature = "tt_3"))]

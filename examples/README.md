@@ -53,6 +53,19 @@ Shows working with Individual objects from the Veda platform:
 cargo run --example individual_operations
 ```
 
+### 5. 🗄️ [mdbx_usage.rs](mdbx_usage.rs) - MDBX Storage Usage
+Demonstrates working with MDBX storage (libmdbx):
+- 💾 Direct MDBX storage creation
+- 🏭 Using StorageProvider for MDBX
+- 🔄 VStorage integration with MDBX
+- ⚡ Generic MDBX storage (static dispatch)
+- 🏗️ Builder pattern for MDBX
+- 🚀 Enum-based storage with MDBX
+
+```bash
+cargo run --example mdbx_usage
+```
+
 
 
 ## How to Run Examples
@@ -64,6 +77,7 @@ cargo run --example basic_usage
 cargo run --example storage_types  
 cargo run --example factory_patterns
 cargo run --example individual_operations
+cargo run --example mdbx_usage
 ```
 
 ### With additional features
@@ -144,7 +158,12 @@ cargo check --example individual_operations
 ### Runtime Errors
 
 **LMDB unavailable:**
-- LMDB storage requires system libraries
+- LMDB storage requires system libraries (heed 0.22.0)
+- Use MemoryStorage for testing
+
+**MDBX unavailable:**
+- MDBX storage requires libmdbx 0.6.3
+- More modern alternative to LMDB with better performance
 - Use MemoryStorage for testing
 
 **Tarantool unavailable:**

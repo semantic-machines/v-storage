@@ -20,6 +20,7 @@ use crate::common::{Storage, StorageId, StorageResult, StorageDispatcher};
 pub enum VStorageEnum {
     Memory(crate::memory_storage::MemoryStorage),
     Lmdb(crate::lmdb_storage::LMDBStorage),
+    Mdbx(crate::mdbx_storage::MDBXStorage),
     Remote(crate::remote_storage_client::StorageROClient),
     #[cfg(any(feature = "tt_2", feature = "tt_3"))]
     Tarantool(crate::tt_storage::TTStorage),
@@ -41,6 +42,11 @@ impl VStorageEnum {
     /// Создает LMDB хранилище
     pub fn lmdb(path: &str, mode: crate::common::StorageMode, max_read_counter_reopen: Option<u64>) -> Self {
         VStorageEnum::Lmdb(crate::lmdb_storage::LMDBStorage::new(path, mode, max_read_counter_reopen))
+    }
+
+    /// Создает MDBX хранилище
+    pub fn mdbx(path: &str, mode: crate::common::StorageMode, max_read_counter_reopen: Option<u64>) -> Self {
+        VStorageEnum::Mdbx(crate::mdbx_storage::MDBXStorage::new(path, mode, max_read_counter_reopen))
     }
 
     /// Создает удаленное хранилище
@@ -65,6 +71,7 @@ impl Storage for VStorageEnum {
         match self {
             VStorageEnum::Memory(s) => s.get_individual(storage, id, iraw),
             VStorageEnum::Lmdb(s) => s.get_individual(storage, id, iraw),
+            VStorageEnum::Mdbx(s) => s.get_individual(storage, id, iraw),
             VStorageEnum::Remote(s) => s.get_individual(storage, id, iraw),
             #[cfg(any(feature = "tt_2", feature = "tt_3"))]
             VStorageEnum::Tarantool(s) => s.get_individual(storage, id, iraw),
@@ -76,6 +83,7 @@ impl Storage for VStorageEnum {
         match self {
             VStorageEnum::Memory(s) => s.get_value(storage, key),
             VStorageEnum::Lmdb(s) => s.get_value(storage, key),
+            VStorageEnum::Mdbx(s) => s.get_value(storage, key),
             VStorageEnum::Remote(s) => s.get_value(storage, key),
             #[cfg(any(feature = "tt_2", feature = "tt_3"))]
             VStorageEnum::Tarantool(s) => s.get_value(storage, key),
@@ -87,6 +95,7 @@ impl Storage for VStorageEnum {
         match self {
             VStorageEnum::Memory(s) => s.get_raw_value(storage, key),
             VStorageEnum::Lmdb(s) => s.get_raw_value(storage, key),
+            VStorageEnum::Mdbx(s) => s.get_raw_value(storage, key),
             VStorageEnum::Remote(s) => s.get_raw_value(storage, key),
             #[cfg(any(feature = "tt_2", feature = "tt_3"))]
             VStorageEnum::Tarantool(s) => s.get_raw_value(storage, key),
@@ -98,6 +107,7 @@ impl Storage for VStorageEnum {
         match self {
             VStorageEnum::Memory(s) => s.put_value(storage, key, val),
             VStorageEnum::Lmdb(s) => s.put_value(storage, key, val),
+            VStorageEnum::Mdbx(s) => s.put_value(storage, key, val),
             VStorageEnum::Remote(s) => s.put_value(storage, key, val),
             #[cfg(any(feature = "tt_2", feature = "tt_3"))]
             VStorageEnum::Tarantool(s) => s.put_value(storage, key, val),
@@ -109,6 +119,7 @@ impl Storage for VStorageEnum {
         match self {
             VStorageEnum::Memory(s) => s.put_raw_value(storage, key, val),
             VStorageEnum::Lmdb(s) => s.put_raw_value(storage, key, val),
+            VStorageEnum::Mdbx(s) => s.put_raw_value(storage, key, val),
             VStorageEnum::Remote(s) => s.put_raw_value(storage, key, val),
             #[cfg(any(feature = "tt_2", feature = "tt_3"))]
             VStorageEnum::Tarantool(s) => s.put_raw_value(storage, key, val),
@@ -120,6 +131,7 @@ impl Storage for VStorageEnum {
         match self {
             VStorageEnum::Memory(s) => s.remove_value(storage, key),
             VStorageEnum::Lmdb(s) => s.remove_value(storage, key),
+            VStorageEnum::Mdbx(s) => s.remove_value(storage, key),
             VStorageEnum::Remote(s) => s.remove_value(storage, key),
             #[cfg(any(feature = "tt_2", feature = "tt_3"))]
             VStorageEnum::Tarantool(s) => s.remove_value(storage, key),
@@ -131,6 +143,7 @@ impl Storage for VStorageEnum {
         match self {
             VStorageEnum::Memory(s) => s.count(storage),
             VStorageEnum::Lmdb(s) => s.count(storage),
+            VStorageEnum::Mdbx(s) => s.count(storage),
             VStorageEnum::Remote(s) => s.count(storage),
             #[cfg(any(feature = "tt_2", feature = "tt_3"))]
             VStorageEnum::Tarantool(s) => s.count(storage),
@@ -405,6 +418,7 @@ impl<S: Storage + std::fmt::Debug> std::fmt::Debug for VStorageGeneric<S> {
 
 pub type VMemoryStorage = VStorageGeneric<crate::memory_storage::MemoryStorage>;
 pub type VLMDBStorage = VStorageGeneric<crate::lmdb_storage::LMDBStorage>;
+pub type VMDBXStorage = VStorageGeneric<crate::mdbx_storage::MDBXStorage>;
 pub type VRemoteStorage = VStorageGeneric<crate::remote_storage_client::StorageROClient>;
 #[cfg(any(feature = "tt_2", feature = "tt_3"))]
 pub type VTTStorage = VStorageGeneric<crate::tt_storage::TTStorage>;

@@ -35,6 +35,11 @@ pub enum StorageConfig {
         mode: StorageMode,
         max_read_counter_reopen: Option<u64>,
     },
+    Mdbx {
+        path: String,
+        mode: StorageMode,
+        max_read_counter_reopen: Option<u64>,
+    },
     Remote {
         address: String,
     },
@@ -63,6 +68,15 @@ impl StorageBuilder {
 
     pub fn lmdb(mut self, path: &str, mode: StorageMode, max_read_counter_reopen: Option<u64>) -> Self {
         self.config = Some(StorageConfig::Lmdb {
+            path: path.to_string(),
+            mode,
+            max_read_counter_reopen,
+        });
+        self
+    }
+
+    pub fn mdbx(mut self, path: &str, mode: StorageMode, max_read_counter_reopen: Option<u64>) -> Self {
+        self.config = Some(StorageConfig::Mdbx {
             path: path.to_string(),
             mode,
             max_read_counter_reopen,
@@ -117,6 +131,17 @@ impl StorageBuilder {
         } else {
             Err(StorageError::InvalidConfiguration(
                 "Builder is not configured for LMDB storage".to_string()
+            ))
+        }
+    }
+
+    /// Создает generic MDBX хранилище
+    pub fn build_mdbx_generic(self) -> Result<crate::vstorage::VMDBXStorage, StorageError> {
+        if let Some(StorageConfig::Mdbx { path, mode, max_read_counter_reopen }) = self.config {
+            Ok(crate::vstorage::VMDBXStorage::new(crate::mdbx_storage::MDBXStorage::new(&path, mode, max_read_counter_reopen)))
+        } else {
+            Err(StorageError::InvalidConfiguration(
+                "Builder is not configured for MDBX storage".to_string()
             ))
         }
     }
@@ -176,6 +201,12 @@ impl StorageProvider {
         Box::new(crate::lmdb_storage::LMDBStorage::new(db_path, mode, max_read_counter_reopen))
     }
 
+    /// Создает новое MDBX хранилище (dynamic dispatch)
+    pub fn mdbx(db_path: &str, mode: StorageMode, max_read_counter_reopen: Option<u64>) -> Box<dyn Storage> {
+        log::info!("Trying to connect to [MDBX], path: {}", db_path);
+        Box::new(crate::mdbx_storage::MDBXStorage::new(db_path, mode, max_read_counter_reopen))
+    }
+
     /// Создает новое удаленное хранилище (dynamic dispatch)
     pub fn remote(addr: &str) -> Box<dyn Storage> {
         log::info!("Trying to connect to [remote], addr: {}", addr);
@@ -197,6 +228,11 @@ impl StorageProvider {
     /// Создает VStorage с LMDB
     pub fn vstorage_lmdb(db_path: &str, mode: StorageMode, max_read_counter_reopen: Option<u64>) -> crate::vstorage::VStorage {
         crate::vstorage::VStorage::new(Self::lmdb(db_path, mode, max_read_counter_reopen))
+    }
+
+    /// Создает VStorage с MDBX
+    pub fn vstorage_mdbx(db_path: &str, mode: StorageMode, max_read_counter_reopen: Option<u64>) -> crate::vstorage::VStorage {
+        crate::vstorage::VStorage::new(Self::mdbx(db_path, mode, max_read_counter_reopen))
     }
 
     /// Создает VStorage с удаленным хранилищем
@@ -224,6 +260,12 @@ impl StorageProvider {
     pub fn lmdb_generic(db_path: &str, mode: StorageMode, max_read_counter_reopen: Option<u64>) -> crate::vstorage::VLMDBStorage {
         log::info!("Creating generic LMDB storage, path: {}", db_path);
         crate::vstorage::VLMDBStorage::new(crate::lmdb_storage::LMDBStorage::new(db_path, mode, max_read_counter_reopen))
+    }
+
+    /// Создает generic MDBX хранилище
+    pub fn mdbx_generic(db_path: &str, mode: StorageMode, max_read_counter_reopen: Option<u64>) -> crate::vstorage::VMDBXStorage {
+        log::info!("Creating generic MDBX storage, path: {}", db_path);
+        crate::vstorage::VMDBXStorage::new(crate::mdbx_storage::MDBXStorage::new(db_path, mode, max_read_counter_reopen))
     }
 
     /// Создает generic удаленное хранилище
@@ -255,6 +297,9 @@ impl DefaultStorageFactory {
             }
             StorageConfig::Lmdb { path, mode, max_read_counter_reopen } => {
                 Ok(StorageProvider::lmdb(&path, mode, max_read_counter_reopen))
+            }
+            StorageConfig::Mdbx { path, mode, max_read_counter_reopen } => {
+                Ok(StorageProvider::mdbx(&path, mode, max_read_counter_reopen))
             }
             StorageConfig::Remote { address } => {
                 Ok(StorageProvider::remote(&address))
